@@ -48,7 +48,7 @@ Then log out and back in.
 
 ## How it works
 
-The extension makes no network requests and never reads your credentials. It watches two local files and shows whichever was updated most recently:
+By default the extension makes no network requests and never reads your credentials. It watches two local files and shows whichever was updated most recently:
 
 | Source | File | Updated |
 | --- | --- | --- |
@@ -58,6 +58,20 @@ The extension makes no network requests and never reads your credentials. It wat
 Claude Code passes your current rate limits to its status line command. `claude-usage-statusline` saves them to the cache file and prints a short status line like `Opus · 5h 42% · 7d 18%`.
 
 Reset times only come from Claude Code. If you only use Claude Desktop, the menu shows percentages without reset times.
+
+The status line only runs in a terminal `claude` session. The Code tab of Claude Desktop does not run it, so with Claude Desktop alone the indicator updates every 15 minutes or so.
+
+## Faster updates with the usage API
+
+For quicker updates, the extension can ask Anthropic for your usage directly. This is off by default. Turn it on in the extension's preferences:
+
+```bash
+gnome-extensions prefs claude-usage@dinomalin
+```
+
+When enabled, the extension reads the Claude Code login from `~/.claude/.credentials.json` and requests `https://api.anthropic.com/api/oauth/usage` at the interval you choose (2 minutes by default, 1 minute minimum). It never refreshes or writes the login. If the token has expired, open Claude Code once to refresh it. Errors show up at the bottom of the menu.
+
+This endpoint is undocumented and may change or stop working at any time.
 
 ## Keeping your own Claude Code status line
 

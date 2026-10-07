@@ -7,7 +7,7 @@ ext_dir="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/$uuid"
 script="$HOME/.local/bin/claude-usage-statusline"
 settings="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
 
-for cmd in jq gsettings; do
+for cmd in jq gsettings glib-compile-schemas; do
   if ! command -v "$cmd" >/dev/null; then
     echo "Missing dependency: $cmd" >&2
     exit 1
@@ -16,7 +16,8 @@ done
 
 rm -rf "$ext_dir"
 mkdir -p "$ext_dir"
-cp "$repo_dir/$uuid/"* "$ext_dir/"
+cp -r "$repo_dir/$uuid/"* "$ext_dir/"
+glib-compile-schemas "$ext_dir/schemas"
 install -Dm755 "$repo_dir/claude-usage-statusline" "$script"
 echo "Installed extension to $ext_dir"
 echo "Installed status line script to $script"

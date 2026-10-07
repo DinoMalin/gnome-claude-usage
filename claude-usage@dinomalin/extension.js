@@ -3,6 +3,7 @@ import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import St from 'gi://St';
 import Clutter from 'gi://Clutter';
+import Soup from 'gi://Soup';
 
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -10,11 +11,13 @@ import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 Gio._promisify(Gio.File.prototype, 'load_contents_async');
+Gio._promisify(Soup.Session.prototype, 'send_and_read_async');
 
 const TICK_SECONDS = 60;
 const TRACK_WIDTH = 260;
 const WARNING_PERCENT = 75;
 const CRITICAL_PERCENT = 90;
+const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 
 const WINDOWS = [
     {key: 'five_hour', title: 'Session (5h)', inBar: true},
@@ -36,7 +39,7 @@ function normalizeWindows(raw) {
         const w = raw?.[key];
         if (!w)
             continue;
-        const percent = w.used_percentage;
+        const percent = w.used_percentage ?? w.utilization;
         if (percent === null || percent === undefined)
             continue;
         windows[key] = {percent: Number(percent), resetsAt: parseReset(w.resets_at)};
@@ -48,6 +51,13 @@ function parseStatusline(data) {
     return {
         updatedAt: parseReset(data.updated_at) ?? Date.now(),
         windows: normalizeWindows(data.rate_limits),
+    };
+}
+
+function parseApiUsage(data) {
+    return {
+        updatedAt: Date.now(),
+        windows: normalizeWindows(data),
     };
 }
 
@@ -205,7 +215,8 @@ export default class ClaudeUsageExtension extends Extension {
         GLib.mkdir_with_parents(cacheDir, 0o755);
 
         this._cancellable = new Gio.Cancellable();
-        this._snapshots = {statusline: null, desktop: null};
+        this._snapshots = {statusline: null, desktop: null, api: null};
+        this._apiError = null;
 
         this._indicator = new UsageIndicator();
         Main.panel.addToStatusArea(this.uuid, this._indicator);
@@ -222,6 +233,13 @@ export default class ClaudeUsageExtension extends Extension {
             return GLib.SOURCE_CONTINUE;
         });
 
+        this._settings = this.getSettings();
+        this._settings.connectObject(
+            'changed::api-polling', () => this._schedulePolling(),
+            'changed::api-interval', () => this._schedulePolling(),
+            this);
+        this._schedulePolling();
+
         Promise.all(loads).then(() => this._render());
     }
 
@@ -230,6 +248,9 @@ export default class ClaudeUsageExtension extends Extension {
             GLib.source_remove(this._tickId);
             this._tickId = 0;
         }
+        this._stopPolling();
+        this._settings?.disconnectObject(this);
+        this._settings = null;
         this._cancellable?.cancel();
         this._cancellable = null;
         this._monitors?.forEach(monitor => monitor.cancel());
@@ -237,6 +258,78 @@ export default class ClaudeUsageExtension extends Extension {
         this._indicator?.destroy();
         this._indicator = null;
         this._snapshots = null;
+        this._apiError = null;
+    }
+
+    _schedulePolling() {
+        this._stopPolling();
+        this._snapshots.api = null;
+        this._apiError = null;
+        if (this._settings.get_boolean('api-polling')) {
+            this._session = new Soup.Session({user_agent: `gnome-claude-usage/${this.metadata.version}`, timeout: 30});
+            this._pollId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, this._settings.get_int('api-interval'), () => {
+                this._fetchUsage();
+                return GLib.SOURCE_CONTINUE;
+            });
+            this._fetchUsage();
+        }
+        this._render();
+    }
+
+    _stopPolling() {
+        if (this._pollId) {
+            GLib.source_remove(this._pollId);
+            this._pollId = 0;
+        }
+        this._session?.abort();
+        this._session = null;
+    }
+
+    async _readAccessToken() {
+        const configDir = GLib.getenv('CLAUDE_CONFIG_DIR') ?? GLib.build_filenamev([GLib.get_home_dir(), '.claude']);
+        const file = Gio.File.new_for_path(GLib.build_filenamev([configDir, '.credentials.json']));
+        let contents;
+        try {
+            [contents] = await file.load_contents_async(this._cancellable);
+        } catch (e) {
+            if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.NOT_FOUND))
+                throw new Error('no Claude Code login found');
+            throw e;
+        }
+        const oauth = JSON.parse(new TextDecoder().decode(contents)).claudeAiOauth;
+        if (!oauth?.accessToken)
+            throw new Error('no Claude Code login found');
+        if (oauth.expiresAt && oauth.expiresAt <= Date.now())
+            throw new Error('login expired, open Claude Code to refresh it');
+        return oauth.accessToken;
+    }
+
+    async _fetchUsage() {
+        const session = this._session;
+        try {
+            const token = await this._readAccessToken();
+            const message = Soup.Message.new('GET', USAGE_URL);
+            message.request_headers.append('Authorization', `Bearer ${token}`);
+            message.request_headers.append('anthropic-beta', 'oauth-2025-04-20');
+            message.request_headers.append('Accept', 'application/json');
+            const bytes = await session.send_and_read_async(message, GLib.PRIORITY_DEFAULT, this._cancellable);
+            if (session !== this._session)
+                return;
+            const status = message.get_status();
+            if (status !== Soup.Status.OK)
+                throw new Error(`HTTP ${status}`);
+            const snapshot = parseApiUsage(JSON.parse(new TextDecoder().decode(bytes.get_data())));
+            if (!Object.keys(snapshot.windows).length)
+                throw new Error('unexpected response');
+            this._snapshots.api = snapshot;
+            this._apiError = null;
+        } catch (e) {
+            if (session !== this._session || e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+                return;
+            this._apiError = e.message;
+            console.warn(`claude-usage: usage API request failed: ${e.message}`);
+        }
+        this._render();
     }
 
     _latest() {
@@ -265,7 +358,7 @@ export default class ClaudeUsageExtension extends Extension {
         const status = latest
             ? `Updated ${formatDuration(Date.now() - latest.updatedAt)} ago`
             : 'No usage data yet';
-        this._indicator.render(latest, status);
+        this._indicator.render(latest, this._apiError ? `${status}\nAPI: ${this._apiError}` : status);
     }
 
     _watch(dir, basename, source, parse) {

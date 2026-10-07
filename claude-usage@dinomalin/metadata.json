@@ -6,5 +6,6 @@
     "50"
   ],
   "version": 1,
-  "url": "https://github.com/DinoMalin/gnome-claude-usage"
+  "url": "https://github.com/DinoMalin/gnome-claude-usage",
+  "settings-schema": "org.gnome.shell.extensions.claude-usage"
 }

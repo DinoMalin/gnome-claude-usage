@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.claude-usage" path="/org/gnome/shell/extensions/claude-usage/">
+    <key name="api-polling" type="b">
+      <default>false</default>
+      <summary>Poll the Anthropic usage API</summary>
+      <description>Fetch usage from Anthropic with the Claude Code login instead of waiting for local files to change.</description>
+    </key>
+    <key name="api-interval" type="i">
+      <range min="60" max="3600"/>
+      <default>120</default>
+      <summary>Seconds between API requests</summary>
+    </key>
+  </schema>
+</schemalist>
